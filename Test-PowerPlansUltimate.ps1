@@ -115,4 +115,17 @@ if ($LASTEXITCODE -eq 0 -and ($boostSlider | Out-String) -match '\|\s*\d+\s+vboo
     }
 }
 
+Import-Module NetAdapter -ErrorAction SilentlyContinue
+if (Get-Command Get-NetAdapterAdvancedProperty -ErrorAction SilentlyContinue) {
+    foreach ($keyword in '*PMARPOffload', '*PMNSOffload') {
+        $prop = Get-NetAdapterAdvancedProperty -Name 'Ethernet' -RegistryKeyword $keyword -ErrorAction SilentlyContinue
+        if ($prop) {
+            $actual = @($prop.RegistryValue | Select-Object -First 1)
+            if ($actual.Count -gt 0 -and ([string] $actual[0]) -ne '0') {
+                throw "Ethernet low-power offload is not disabled: $keyword=$($actual[0])"
+            }
+        }
+    }
+}
+
 'PASS'

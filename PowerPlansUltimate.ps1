@@ -281,6 +281,59 @@ function Set-RegistryPerformanceGuards {
     $changed
 }
 
+function Set-NetworkAdapterMaximumPerformance {
+    $changed = 0
+    $verified = 0
+    $unsupported = 0
+    $details = @()
+
+    try {
+        Import-Module NetAdapter -ErrorAction SilentlyContinue | Out-Null
+        if (-not (Get-Command Get-NetAdapterAdvancedProperty -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ Changed = 0; Verified = 0; Unsupported = 1; Detail = 'NetAdapter module unavailable' }
+        }
+
+        $targets = @(
+            @{ Keyword = '*EEE'; Value = 0 },
+            @{ Keyword = 'AdvancedEEE'; Value = 0 },
+            @{ Keyword = 'EnableGreenEthernet'; Value = 0 },
+            @{ Keyword = 'PowerSavingMode'; Value = 0 },
+            @{ Keyword = '*PMARPOffload'; Value = 0 },
+            @{ Keyword = '*PMNSOffload'; Value = 0 }
+        )
+
+        $adapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -in @('Up', 'Disconnected') })
+        foreach ($adapter in $adapters) {
+            foreach ($target in $targets) {
+                $prop = Get-NetAdapterAdvancedProperty -Name $adapter.Name -RegistryKeyword $target.Keyword -ErrorAction SilentlyContinue
+                if (-not $prop) {
+                    continue
+                }
+
+                Set-NetAdapterAdvancedProperty -Name $adapter.Name -RegistryKeyword $target.Keyword -RegistryValue $target.Value -NoRestart -ErrorAction SilentlyContinue
+                $changed++
+                $after = Get-NetAdapterAdvancedProperty -Name $adapter.Name -RegistryKeyword $target.Keyword -ErrorAction SilentlyContinue
+                $actual = @($after.RegistryValue | Select-Object -First 1)
+                if ($actual.Count -gt 0 -and ([string] $actual[0]) -eq ([string] $target.Value)) {
+                    $verified++
+                } else {
+                    $details += ('{0}:{1}' -f $adapter.Name, $target.Keyword)
+                }
+            }
+        }
+    } catch {
+        $unsupported++
+        $details += $_.Exception.Message
+    }
+
+    [pscustomobject]@{
+        Changed = $changed
+        Verified = $verified
+        Unsupported = $unsupported
+        Detail = (($details | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join '; ')
+    }
+}
+
 function Invoke-NvidiaSmiSafe {
     param(
         [Parameter(Mandatory = $true)]
@@ -664,6 +717,7 @@ function Apply-UltimatePowerPlan {
 
     [void] (Invoke-PowerCfgSafe -Arguments @('/hibernate', 'off'))
     [void] (Set-RegistryPerformanceGuards)
+    $networkResult = Set-NetworkAdapterMaximumPerformance
     $conflictsDisabled = @(Disable-ConflictingPowerPlanTasks)
     $nvidiaResult = Set-NvidiaMaximumPerformance
     $amdResult = Set-AmdVendorPerformanceIfAvailable
@@ -689,6 +743,7 @@ function Apply-UltimatePowerPlan {
     Write-PowerPlansStatus ("  [+] Readback verified settings: {0}; mismatches: {1}" -f $verifiedCount, $mismatchCount) 'Green'
     Write-PowerPlansStatus ("  [+] Conflicting plan switchers disabled this run: {0}" -f $conflictsDisabled.Count) 'Green'
     Write-PowerPlansStatus ("  [+] Unsupported/write-rejected setting probes proven: {0}" -f $unsupportedEvidence.Count) 'Green'
+    Write-PowerPlansStatus ("  [+] NIC low-power features disabled/verified: {0}/{1}" -f $networkResult.Verified, $networkResult.Changed) 'Green'
     Write-PowerPlansStatus ("  [+] NVIDIA: power max={0}; graphics clock lock={1}; memory clock lock={2}; boost slider max={3}" -f $nvidiaResult.PowerLimitSet, $nvidiaResult.GraphicsClockLocked, $nvidiaResult.MemoryClockLocked, $nvidiaResult.BoostSliderSet) 'Green'
     Write-PowerPlansStatus ("  [+] AMD vendor: 3D V-Cache service status={0}; Ryzen Master CLI={1}" -f $amdResult.VCacheService, $amdResult.RyzenMasterCli) 'Green'
     if (-not $NoStartupTask -and -not $Silent) {
@@ -732,6 +787,9 @@ function Apply-UltimatePowerPlan {
         UnsupportedProbeLabels = (($unsupportedEvidence | ForEach-Object { $_.Label }) -join ', ')
         ConflictTasksDisabled = $conflictsDisabled.Count
         ConflictTaskNames = (($conflictsDisabled | ForEach-Object { $_.Name }) -join ', ')
+        NetworkLowPowerSettingsChanged = $networkResult.Changed
+        NetworkLowPowerSettingsVerified = $networkResult.Verified
+        NetworkLowPowerUnsupported = $networkResult.Unsupported
         StartupTaskInstalled = ($taskInstallResult.BootInstalled -and $taskInstallResult.GuardInstalled)
         StartupBootTaskInstalled = $taskInstallResult.BootInstalled
         StartupGuardTaskInstalled = $taskInstallResult.GuardInstalled
