@@ -8,8 +8,8 @@ $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
 
 $PlanName = 'Codex_Ultimate_Nuclear_Performance'
-$LogonTaskName = 'Codex Ultimate Power Plan Enforcer'
 $BootTaskName = 'Codex Ultimate Power Plan Boot Enforcer'
+$GuardTaskName = 'Codex Ultimate Power Plan Guard'
 $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexPowerPlans'
 $StartupScriptPath = Join-Path $StateRoot 'Apply-UltimatePowerPlan.ps1'
 $StartupVbsPath = Join-Path $StateRoot 'Apply-UltimatePowerPlan.vbs'
@@ -206,17 +206,27 @@ function Register-HiddenPowerPlanTask {
         [string] $Name,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Logon', 'Boot')]
+        [ValidateSet('Logon', 'Boot', 'Guard')]
         [string] $TriggerKind
     )
 
     $installed = $false
-    $schedule = if ($TriggerKind -eq 'Boot') { 'ONSTART' } else { 'ONLOGON' }
+    $schedule = if ($TriggerKind -eq 'Boot') {
+        'ONSTART'
+    } elseif ($TriggerKind -eq 'Guard') {
+        'MINUTE'
+    } else {
+        'ONLOGON'
+    }
     $taskRun = $WScriptPath + ' //B //Nologo "' + $StartupVbsPath + '"'
     try {
-        & schtasks.exe /Delete /TN $Name /F | Out-Null
+        & schtasks.exe /Delete /TN $Name /F 2>$null | Out-Null
     } catch {}
-    $create = & schtasks.exe /Create /TN $Name /SC $schedule /TR $taskRun /F 2>&1
+    if ($TriggerKind -eq 'Guard') {
+        $create = & schtasks.exe /Create /TN $Name /SC $schedule /MO 1 /TR $taskRun /F 2>&1
+    } else {
+        $create = & schtasks.exe /Create /TN $Name /SC $schedule /TR $taskRun /F 2>&1
+    }
     if ($LASTEXITCODE -eq 0) {
         $installed = $true
     }
@@ -226,6 +236,8 @@ function Register-HiddenPowerPlanTask {
             $action = New-ScheduledTaskAction -Execute $WScriptPath -Argument ('//B //Nologo "' + $StartupVbsPath + '"')
             if ($TriggerKind -eq 'Boot') {
                 $trigger = New-ScheduledTaskTrigger -AtStartup
+            } elseif ($TriggerKind -eq 'Guard') {
+                $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
             } else {
                 $trigger = New-ScheduledTaskTrigger -AtLogOn
             }
@@ -236,7 +248,7 @@ function Register-HiddenPowerPlanTask {
         } catch {}
     }
 
-    if ($TriggerKind -eq 'Boot') {
+    if ($TriggerKind -ne 'Logon') {
         try {
             $task = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
             $task.Settings.Enabled = $true
@@ -256,12 +268,16 @@ function Register-HiddenPowerPlanTask {
 function Install-HiddenStartupTask {
     Write-StartupAssets
 
-    $logonInstalled = Register-HiddenPowerPlanTask -Name $LogonTaskName -TriggerKind Logon
+    try {
+        & schtasks.exe /Delete /TN 'Codex Ultimate Power Plan Enforcer' /F 2>$null | Out-Null
+    } catch {}
+
     $bootInstalled = Register-HiddenPowerPlanTask -Name $BootTaskName -TriggerKind Boot
+    $guardInstalled = Register-HiddenPowerPlanTask -Name $GuardTaskName -TriggerKind Guard
 
     [pscustomobject]@{
-        LogonInstalled = [bool] $logonInstalled
         BootInstalled = [bool] $bootInstalled
+        GuardInstalled = [bool] $guardInstalled
     }
 }
 
@@ -315,7 +331,7 @@ function Apply-UltimatePowerPlan {
     [void] (Set-RegistryPerformanceGuards)
     [void] (Invoke-PowerCfgSafe -Arguments @('/setactive', $schemeGuid))
 
-    $taskInstallResult = [pscustomobject]@{ LogonInstalled = $false; BootInstalled = $false }
+    $taskInstallResult = [pscustomobject]@{ BootInstalled = $false; GuardInstalled = $false }
     if (-not $NoStartupTask -and -not $Silent) {
         $taskInstallResult = Install-HiddenStartupTask
     }
@@ -329,10 +345,10 @@ function Apply-UltimatePowerPlan {
     Write-PowerPlansStatus '  [+] Timeouts: monitor, disk, sleep, and hibernate disabled' 'Green'
     Write-PowerPlansStatus ("  [+] Supported settings forced: {0}; unsupported on this hardware skipped silently: {1}; failed: {2}" -f $setCount, $unsupportedCount, $failedCount) 'Green'
     if (-not $NoStartupTask -and -not $Silent) {
-        if ($taskInstallResult.LogonInstalled -and $taskInstallResult.BootInstalled) {
-            Write-PowerPlansStatus ("  [+] Startup permanence: hidden boot task and no-popup logon task installed") 'Green'
-        } elseif ($taskInstallResult.LogonInstalled) {
-            Write-PowerPlansStatus ("  [!] Startup permanence: hidden logon task installed; boot task registration failed") 'Yellow'
+        if ($taskInstallResult.BootInstalled -and $taskInstallResult.GuardInstalled) {
+            Write-PowerPlansStatus ("  [+] Startup permanence: hidden boot task and hidden recurring guard installed") 'Green'
+        } elseif ($taskInstallResult.BootInstalled) {
+            Write-PowerPlansStatus ("  [!] Startup permanence: hidden boot task installed; recurring guard registration failed") 'Yellow'
         } else {
             Write-PowerPlansStatus ("  [!] Startup permanence: task registration failed; plan remains active now") 'Yellow'
         }
@@ -355,11 +371,11 @@ function Apply-UltimatePowerPlan {
         SupportedSettingsSet = $setCount
         UnsupportedSettingsSkipped = $unsupportedCount
         FailedSettings = $failedCount
-        StartupTaskInstalled = ($taskInstallResult.LogonInstalled -and $taskInstallResult.BootInstalled)
-        StartupLogonTaskInstalled = $taskInstallResult.LogonInstalled
+        StartupTaskInstalled = ($taskInstallResult.BootInstalled -and $taskInstallResult.GuardInstalled)
         StartupBootTaskInstalled = $taskInstallResult.BootInstalled
-        StartupLogonTaskName = $LogonTaskName
+        StartupGuardTaskInstalled = $taskInstallResult.GuardInstalled
         StartupBootTaskName = $BootTaskName
+        StartupGuardTaskName = $GuardTaskName
         StartupVbsPath = $StartupVbsPath
         StartupScriptPath = $StartupScriptPath
         PersistedPlanGuidPath = $PlanGuidPath

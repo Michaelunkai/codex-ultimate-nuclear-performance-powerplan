@@ -2,7 +2,7 @@
 
 PowerShell 5-compatible helper for the `POWERPLANS` profile command.
 
-It creates or reuses the `Codex_Ultimate_Nuclear_Performance` Windows power plan, persists the exact GUID it selected, applies supported maximum-performance `powercfg` settings for AC and DC, disables sleep/hibernate/display/disk timeouts, and installs a hidden boot task plus a no-popup logon fallback task so the same exact plan is reapplied without terminal popups.
+It creates or reuses the `Codex_Ultimate_Nuclear_Performance` Windows power plan, persists the exact GUID it selected, applies supported maximum-performance `powercfg` settings for AC and DC, disables sleep/hibernate/display/disk timeouts, and installs a hidden boot task plus a hidden recurring guard task so the same exact plan is reapplied without terminal popups even if another component changes plans later.
 
 ## Usage
 
