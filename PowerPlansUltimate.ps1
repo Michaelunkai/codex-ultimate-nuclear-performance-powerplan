@@ -8,10 +8,12 @@ $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
 
 $PlanName = 'Codex_Ultimate_Nuclear_Performance'
-$TaskName = 'Codex Ultimate Power Plan Enforcer'
+$LogonTaskName = 'Codex Ultimate Power Plan Enforcer'
+$BootTaskName = 'Codex Ultimate Power Plan Boot Enforcer'
 $StateRoot = Join-Path $env:LOCALAPPDATA 'CodexPowerPlans'
 $StartupScriptPath = Join-Path $StateRoot 'Apply-UltimatePowerPlan.ps1'
 $StartupVbsPath = Join-Path $StateRoot 'Apply-UltimatePowerPlan.vbs'
+$PlanGuidPath = Join-Path $StateRoot 'CodexUltimatePowerPlan.guid'
 $PowerShell5Path = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $WScriptPath = Join-Path $env:WINDIR 'System32\wscript.exe'
 
@@ -59,9 +61,52 @@ function Get-PowerSchemeRows {
     $rows
 }
 
+function Ensure-StateRoot {
+    if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
+        New-Item -Path $StateRoot -ItemType Directory -Force | Out-Null
+    }
+}
+
+function Get-PersistedPowerPlanGuid {
+    if (-not (Test-Path -LiteralPath $PlanGuidPath -PathType Leaf)) {
+        return $null
+    }
+
+    $raw = (Get-Content -LiteralPath $PlanGuidPath -Raw).Trim()
+    if ($raw -match '^[a-fA-F0-9-]{36}$') {
+        return $raw.ToLowerInvariant()
+    }
+
+    return $null
+}
+
+function Save-PersistedPowerPlanGuid {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $SchemeGuid
+    )
+
+    Ensure-StateRoot
+    Set-Content -LiteralPath $PlanGuidPath -Value $SchemeGuid.ToLowerInvariant() -Encoding ASCII -Force
+}
+
 function Ensure-UltimatePowerPlan {
+    Ensure-StateRoot
+    $schemes = @(Get-PowerSchemeRows)
+    $persistedGuid = Get-PersistedPowerPlanGuid
+    if (-not [string]::IsNullOrWhiteSpace($persistedGuid)) {
+        $persisted = @($schemes | Where-Object { $_.Guid -eq $persistedGuid } | Select-Object -First 1)
+        if ($persisted.Count -gt 0) {
+            if ($persisted[0].Name -ne $PlanName) {
+                [void] (Invoke-PowerCfgSafe -Arguments @('/changename', $persistedGuid, $PlanName, 'Codex-managed permanent maximum-performance plan'))
+            }
+            return $persistedGuid
+        }
+    }
+
     $existing = @(Get-PowerSchemeRows | Where-Object { $_.Name -eq $PlanName } | Select-Object -First 1)
     if ($existing.Count -gt 0) {
+        Save-PersistedPowerPlanGuid -SchemeGuid $existing[0].Guid
         return $existing[0].Guid
     }
 
@@ -76,12 +121,14 @@ function Ensure-UltimatePowerPlan {
         $duplicate = Invoke-PowerCfgSafe -Arguments @('/duplicatescheme', $templateGuid, $newGuid)
         if ($duplicate.ExitCode -eq 0) {
             [void] (Invoke-PowerCfgSafe -Arguments @('/changename', $newGuid, $PlanName, 'Codex-managed permanent maximum-performance plan'))
+            Save-PersistedPowerPlanGuid -SchemeGuid $newGuid
             return $newGuid.ToLowerInvariant()
         }
     }
 
     $active = @(Get-PowerSchemeRows | Where-Object { $_.Active } | Select-Object -First 1)
     if ($active.Count -gt 0) {
+        Save-PersistedPowerPlanGuid -SchemeGuid $active[0].Guid
         return $active[0].Guid
     }
 
@@ -143,9 +190,7 @@ function Set-RegistryPerformanceGuards {
 }
 
 function Write-StartupAssets {
-    if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
-        New-Item -Path $StateRoot -ItemType Directory -Force | Out-Null
-    }
+    Ensure-StateRoot
 
     Copy-Item -LiteralPath $PSCommandPath -Destination $StartupScriptPath -Force
 
@@ -155,27 +200,69 @@ function Write-StartupAssets {
     Set-Content -LiteralPath $StartupVbsPath -Value $vbs -Encoding ASCII -Force
 }
 
+function Register-HiddenPowerPlanTask {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Logon', 'Boot')]
+        [string] $TriggerKind
+    )
+
+    $installed = $false
+    $schedule = if ($TriggerKind -eq 'Boot') { 'ONSTART' } else { 'ONLOGON' }
+    $taskRun = $WScriptPath + ' //B //Nologo "' + $StartupVbsPath + '"'
+    try {
+        & schtasks.exe /Delete /TN $Name /F | Out-Null
+    } catch {}
+    $create = & schtasks.exe /Create /TN $Name /SC $schedule /TR $taskRun /F 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $installed = $true
+    }
+
+    if (-not $installed) {
+        try {
+            $action = New-ScheduledTaskAction -Execute $WScriptPath -Argument ('//B //Nologo "' + $StartupVbsPath + '"')
+            if ($TriggerKind -eq 'Boot') {
+                $trigger = New-ScheduledTaskTrigger -AtStartup
+            } else {
+                $trigger = New-ScheduledTaskTrigger -AtLogOn
+            }
+
+            $settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+            Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Settings $settings -Description 'Silently reapplies the exact Codex ultimate power plan without terminal popups.' -Force | Out-Null
+            $installed = $true
+        } catch {}
+    }
+
+    if ($TriggerKind -eq 'Boot') {
+        try {
+            $task = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+            $task.Settings.Enabled = $true
+            $task.Settings.Hidden = $true
+            Set-ScheduledTask -TaskName $Name -Settings $task.Settings | Out-Null
+            Enable-ScheduledTask -TaskName $Name | Out-Null
+        } catch {}
+    }
+
+    try {
+        & schtasks.exe /Change /TN $Name /ENABLE | Out-Null
+    } catch {}
+
+    $installed
+}
+
 function Install-HiddenStartupTask {
     Write-StartupAssets
 
-    $installed = $false
-    try {
-        $action = New-ScheduledTaskAction -Execute $WScriptPath -Argument ('//B //Nologo "' + $StartupVbsPath + '"')
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
-        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description 'Silently reapplies the Codex ultimate power plan at Windows logon.' -Force | Out-Null
-        $installed = $true
-    } catch {}
+    $logonInstalled = Register-HiddenPowerPlanTask -Name $LogonTaskName -TriggerKind Logon
+    $bootInstalled = Register-HiddenPowerPlanTask -Name $BootTaskName -TriggerKind Boot
 
-    if (-not $installed) {
-        $taskRun = '"' + $WScriptPath + '" //B //Nologo "' + $StartupVbsPath + '"'
-        $create = & schtasks.exe /Create /TN $TaskName /SC ONLOGON /TR $taskRun /F 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $installed = $true
-        }
+    [pscustomobject]@{
+        LogonInstalled = [bool] $logonInstalled
+        BootInstalled = [bool] $bootInstalled
     }
-
-    $installed
 }
 
 function Apply-UltimatePowerPlan {
@@ -228,9 +315,9 @@ function Apply-UltimatePowerPlan {
     [void] (Set-RegistryPerformanceGuards)
     [void] (Invoke-PowerCfgSafe -Arguments @('/setactive', $schemeGuid))
 
-    $taskInstalled = $false
+    $taskInstallResult = [pscustomobject]@{ LogonInstalled = $false; BootInstalled = $false }
     if (-not $NoStartupTask -and -not $Silent) {
-        $taskInstalled = Install-HiddenStartupTask
+        $taskInstallResult = Install-HiddenStartupTask
     }
 
     $active = @(Get-PowerSchemeRows | Where-Object { $_.Active } | Select-Object -First 1)
@@ -242,8 +329,10 @@ function Apply-UltimatePowerPlan {
     Write-PowerPlansStatus '  [+] Timeouts: monitor, disk, sleep, and hibernate disabled' 'Green'
     Write-PowerPlansStatus ("  [+] Supported settings forced: {0}; unsupported on this hardware skipped silently: {1}; failed: {2}" -f $setCount, $unsupportedCount, $failedCount) 'Green'
     if (-not $NoStartupTask -and -not $Silent) {
-        if ($taskInstalled) {
-            Write-PowerPlansStatus ("  [+] Startup permanence: hidden logon task installed: {0}" -f $TaskName) 'Green'
+        if ($taskInstallResult.LogonInstalled -and $taskInstallResult.BootInstalled) {
+            Write-PowerPlansStatus ("  [+] Startup permanence: hidden boot task and no-popup logon task installed") 'Green'
+        } elseif ($taskInstallResult.LogonInstalled) {
+            Write-PowerPlansStatus ("  [!] Startup permanence: hidden logon task installed; boot task registration failed") 'Yellow'
         } else {
             Write-PowerPlansStatus ("  [!] Startup permanence: task registration failed; plan remains active now") 'Yellow'
         }
@@ -266,10 +355,14 @@ function Apply-UltimatePowerPlan {
         SupportedSettingsSet = $setCount
         UnsupportedSettingsSkipped = $unsupportedCount
         FailedSettings = $failedCount
-        StartupTaskInstalled = $taskInstalled
-        StartupTaskName = $TaskName
+        StartupTaskInstalled = ($taskInstallResult.LogonInstalled -and $taskInstallResult.BootInstalled)
+        StartupLogonTaskInstalled = $taskInstallResult.LogonInstalled
+        StartupBootTaskInstalled = $taskInstallResult.BootInstalled
+        StartupLogonTaskName = $LogonTaskName
+        StartupBootTaskName = $BootTaskName
         StartupVbsPath = $StartupVbsPath
         StartupScriptPath = $StartupScriptPath
+        PersistedPlanGuidPath = $PlanGuidPath
     }
 
     if (-not $Silent) {

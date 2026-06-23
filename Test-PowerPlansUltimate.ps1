@@ -23,4 +23,18 @@ if (-not $active) {
     throw 'Codex_Ultimate_Nuclear_Performance is not active after silent apply.'
 }
 
+$guidPath = Join-Path $env:LOCALAPPDATA 'CodexPowerPlans\CodexUltimatePowerPlan.guid'
+if (-not (Test-Path -LiteralPath $guidPath -PathType Leaf)) {
+    throw "Missing persisted GUID file: $guidPath"
+}
+
+$persistedGuid = (Get-Content -LiteralPath $guidPath -Raw).Trim()
+if ($persistedGuid -notmatch '^[a-fA-F0-9-]{36}$') {
+    throw "Invalid persisted GUID: $persistedGuid"
+}
+
+if ($active.Line -notmatch [regex]::Escape($persistedGuid)) {
+    throw "Active plan is not the persisted exact GUID: $persistedGuid"
+}
+
 'PASS'
