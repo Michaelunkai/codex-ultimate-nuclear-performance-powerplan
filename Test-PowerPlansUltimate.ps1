@@ -23,7 +23,13 @@ if (-not $active) {
     throw 'Codex_Ultimate_Nuclear_Performance is not active after silent apply.'
 }
 
-$guidPath = Join-Path $env:ProgramData 'CodexPowerPlans\CodexUltimatePowerPlan.guid'
+$installRoot = if ((Split-Path -Leaf $PSScriptRoot) -eq '.codex-powerplan-state') {
+    Split-Path -Parent $PSScriptRoot
+} else {
+    $PSScriptRoot
+}
+$stateRoot = Join-Path $installRoot '.codex-powerplan-state'
+$guidPath = Join-Path $stateRoot 'CodexUltimatePowerPlan.guid'
 if (-not (Test-Path -LiteralPath $guidPath -PathType Leaf)) {
     throw "Missing persisted GUID file: $guidPath"
 }
@@ -58,6 +64,9 @@ foreach ($taskName in $expectedTasks) {
     }
     if ($task.Actions[0].Arguments -notmatch '//B //Nologo') {
         throw "Task action is not no-popup mode: $taskName"
+    }
+    if ($task.Actions[0].Arguments -notmatch [regex]::Escape((Join-Path $stateRoot 'Apply-UltimatePowerPlan.vbs'))) {
+        throw "Task action does not use script-local startup payload: $taskName"
     }
     if ($task.Principal.UserId -ne 'SYSTEM') {
         throw "Task does not run as SYSTEM: $taskName ($($task.Principal.UserId))"

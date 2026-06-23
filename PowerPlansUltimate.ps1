@@ -10,7 +10,12 @@ $ProgressPreference = 'SilentlyContinue'
 $PlanName = 'Codex_Ultimate_Nuclear_Performance'
 $BootTaskName = 'Codex Ultimate Power Plan Boot Enforcer'
 $GuardTaskName = 'Codex Ultimate Power Plan Guard'
-$StateRoot = Join-Path $env:ProgramData 'CodexPowerPlans'
+$InstallRoot = if ((Split-Path -Leaf $PSScriptRoot) -eq '.codex-powerplan-state') {
+    Split-Path -Parent $PSScriptRoot
+} else {
+    $PSScriptRoot
+}
+$StateRoot = Join-Path $InstallRoot '.codex-powerplan-state'
 $StartupScriptPath = Join-Path $StateRoot 'Apply-UltimatePowerPlan.ps1'
 $StartupVbsPath = Join-Path $StateRoot 'Apply-UltimatePowerPlan.vbs'
 $PlanGuidPath = Join-Path $StateRoot 'CodexUltimatePowerPlan.guid'

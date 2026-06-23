@@ -4,3 +4,4 @@
 *.user
 *.ps1xml
 *.zip
+.codex-powerplan-state/
