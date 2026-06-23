@@ -23,7 +23,7 @@ if (-not $active) {
     throw 'Codex_Ultimate_Nuclear_Performance is not active after silent apply.'
 }
 
-$guidPath = Join-Path $env:LOCALAPPDATA 'CodexPowerPlans\CodexUltimatePowerPlan.guid'
+$guidPath = Join-Path $env:ProgramData 'CodexPowerPlans\CodexUltimatePowerPlan.guid'
 if (-not (Test-Path -LiteralPath $guidPath -PathType Leaf)) {
     throw "Missing persisted GUID file: $guidPath"
 }
