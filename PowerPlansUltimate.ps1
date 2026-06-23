@@ -315,12 +315,14 @@ function Set-NvidiaMaximumPerformance {
             PowerLimitSet = $false
             GraphicsClockLocked = $false
             MemoryClockLocked = $false
+            BoostSliderSet = $false
         }
     }
 
     $powerSet = $false
     $graphicsLocked = $false
     $memoryLocked = $false
+    $boostSliderSet = $false
     $details = @()
 
     foreach ($line in ($query.Output -split "`r?`n")) {
@@ -342,17 +344,39 @@ function Set-NvidiaMaximumPerformance {
         if ($lmc.ExitCode -eq 0) { $memoryLocked = $true } else { $details += $lmc.Output }
     }
 
+    $boostList = Invoke-NvidiaSmiSafe -Arguments @('boost-slider', '-l')
+    if ($boostList.ExitCode -eq 0 -and $boostList.Output -match '\|\s*(\d+)\s+vboost\s+(\d+)\s+(\d+)\s*\|') {
+        $boostGpuIndex = $matches[1]
+        $boostMax = [int]::Parse($matches[2], [Globalization.CultureInfo]::InvariantCulture)
+        $boostSet = Invoke-NvidiaSmiSafe -Arguments @('boost-slider', '-i', $boostGpuIndex, ('--vboost={0}' -f $boostMax))
+        if ($boostSet.ExitCode -eq 0) {
+            $boostVerify = Invoke-NvidiaSmiSafe -Arguments @('boost-slider', '-l')
+            if ($boostVerify.ExitCode -eq 0 -and $boostVerify.Output -match '\|\s*\d+\s+vboost\s+\d+\s+(\d+)\s*\|' -and ([int] $matches[1]) -eq $boostMax) {
+                $boostSliderSet = $true
+            } else {
+                $details += $boostVerify.Output
+            }
+        } else {
+            $details += $boostSet.Output
+        }
+    } elseif ($boostList.ExitCode -ne 0) {
+        $details += $boostList.Output
+    }
+
     [pscustomobject]@{
-        Status = if ($powerSet -or $graphicsLocked -or $memoryLocked) { 'Set' } else { 'Unsupported' }
+        Status = if ($powerSet -or $graphicsLocked -or $memoryLocked -or $boostSliderSet) { 'Set' } else { 'Unsupported' }
         Detail = (($details | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join '; ')
         PowerLimitSet = $powerSet
         GraphicsClockLocked = $graphicsLocked
         MemoryClockLocked = $memoryLocked
+        BoostSliderSet = $boostSliderSet
     }
 }
 
 function Set-AmdVendorPerformanceIfAvailable {
     $serviceResult = 'NotInstalled'
+    $ryzenMasterCli = 'NotInstalled'
+    $driverCli = 'NotInstalled'
     try {
         $service = Get-Service -Name 'amd3dvcacheSvc' -ErrorAction SilentlyContinue
         if ($service) {
@@ -366,9 +390,22 @@ function Set-AmdVendorPerformanceIfAvailable {
         $serviceResult = 'Unsupported'
     }
 
+    $ryzenMasterCmd = Join-Path ${env:ProgramFiles(x86)} 'GIGABYTE\EasyTuneEngineService\AMDRyzenMasterCmd.exe'
+    if (Test-Path -LiteralPath $ryzenMasterCmd -PathType Leaf) {
+        $output = (& $ryzenMasterCmd '/?' 2>&1 | Out-String).Trim()
+        $ryzenMasterCli = if ($output -match 'unsupported|status:\s*failed') { 'Unsupported' } elseif ($output) { $output } else { 'Available' }
+    }
+
+    $driverCmd = Join-Path ${env:ProgramFiles(x86)} 'GIGABYTE\EasyTuneEngineService\AMD\Ryzen\AMDRyzenMasterDriverCmd.exe'
+    if (Test-Path -LiteralPath $driverCmd -PathType Leaf) {
+        $output = (& $driverCmd '/?' 2>&1 | Out-String).Trim()
+        $driverCli = if ($output -match 'unsupported|status:\s*failed') { 'Unsupported' } elseif ($output) { $output } else { 'Available' }
+    }
+
     [pscustomobject]@{
         VCacheService = $serviceResult
-        RyzenMasterCli = 'Gigabyte AMDRyzenMasterCmd reports overclock unsupported on this hardware path'
+        RyzenMasterCli = $ryzenMasterCli
+        RyzenMasterDriverCli = $driverCli
     }
 }
 
@@ -514,6 +551,7 @@ function Apply-UltimatePowerPlan {
         @{ Label = 'Power plan type'; Sub = 'SUB_NONE'; Setting = '245d8541-3943-4422-b025-13a784f679b7'; Ac = 1; Dc = 1 },
         @{ Label = 'Device idle policy'; Sub = 'SUB_NONE'; Setting = '4faab71a-92e5-4726-b531-224559672d19'; Ac = 0; Dc = 0 },
         @{ Label = 'Energy Saver Policy'; Sub = 'de830923-a562-41af-a086-e3a2c6bad2da'; Setting = '5c5bb349-ad29-4ee2-9d0b-2b25270f7a81'; Ac = 0; Dc = 0 },
+        @{ Label = 'Energy Saver display brightness weight'; Sub = 'de830923-a562-41af-a086-e3a2c6bad2da'; Setting = '13d09884-f74e-474a-a852-b6bde8ad03a8'; Ac = 100; Dc = 100 },
         @{ Label = 'AHCI link power management HIPM/DIPM'; Sub = 'SUB_DISK'; Setting = '0b2d69d7-a2a1-449c-9680-f91c70521c60'; Ac = 0; Dc = 0 },
         @{ Label = 'Disk maximum power level'; Sub = 'SUB_DISK'; Setting = '51dea550-bb38-4bc4-991b-eacf37be5ec8'; Ac = 100; Dc = 100 },
         @{ Label = 'Hard disk burst ignore time'; Sub = 'SUB_DISK'; Setting = '80e3c60e-bb94-4ad8-bbe0-0d3195efc663'; Ac = 0; Dc = 0 },
@@ -555,6 +593,10 @@ function Apply-UltimatePowerPlan {
         @{ Label = 'Maximum processor frequency class 2 unlimited'; Sub = 'SUB_PROCESSOR'; Setting = '75b0ae3f-bce0-45a7-8c89-c9611c25e102'; Ac = 0; Dc = 0 },
         @{ Label = 'Processor performance increase policy rocket'; Sub = 'SUB_PROCESSOR'; Setting = '465e1f50-b610-473a-ab58-00d1077dc418'; Ac = 2; Dc = 2 },
         @{ Label = 'Processor performance decrease policy single'; Sub = 'SUB_PROCESSOR'; Setting = '40fbefc7-2e9d-4d25-a185-0cfd8574bac6'; Ac = 1; Dc = 1 },
+        @{ Label = 'Processor performance increase threshold class 1'; Sub = 'SUB_PROCESSOR'; Setting = '06cadf0e-64ed-448a-8927-ce7bf90eb35e'; Ac = 0; Dc = 0 },
+        @{ Label = 'Processor performance decrease threshold class 1'; Sub = 'SUB_PROCESSOR'; Setting = '12a0ab44-fe28-4fa9-b3bd-4b64f44960a7'; Ac = 100; Dc = 100 },
+        @{ Label = 'Processor performance increase time class 1'; Sub = 'SUB_PROCESSOR'; Setting = '984cf492-3bed-4488-a8f9-4286c97bf5ab'; Ac = 1; Dc = 1 },
+        @{ Label = 'Processor performance decrease time class 1'; Sub = 'SUB_PROCESSOR'; Setting = 'd8edeb9b-95cf-4f95-a73c-b061973693c9'; Ac = 100; Dc = 100 },
         @{ Label = 'Processor duty cycling disabled'; Sub = 'SUB_PROCESSOR'; Setting = '4e4450b3-6179-4e91-b8f1-5bb9938f81a1'; Ac = 0; Dc = 0 },
         @{ Label = 'Latency hint processor EPP performance'; Sub = 'SUB_PROCESSOR'; Setting = '4b70f900-cdd9-4e66-aa26-ae8417f98173'; Ac = 0; Dc = 0 },
         @{ Label = 'Latency hint processor EPP class 1 performance'; Sub = 'SUB_PROCESSOR'; Setting = '4b70f900-cdd9-4e66-aa26-ae8417f98174'; Ac = 0; Dc = 0 },
@@ -578,6 +620,9 @@ function Apply-UltimatePowerPlan {
         @{ Label = 'Core parking over-utilisation threshold'; Sub = 'SUB_PROCESSOR'; Setting = '943c8cb6-6f93-4227-ad87-e9a3feec08d1'; Ac = 5; Dc = 5 },
         @{ Label = 'Core parking concurrency threshold'; Sub = 'SUB_PROCESSOR'; Setting = '2430ab6f-a520-44a2-9601-f7f23b5134b1'; Ac = 100; Dc = 100 },
         @{ Label = 'Core parking headroom threshold'; Sub = 'SUB_PROCESSOR'; Setting = 'f735a673-2066-4f80-a0c5-ddee0cf1bf5d'; Ac = 0; Dc = 0 },
+        @{ Label = 'Core parking increase time'; Sub = 'SUB_PROCESSOR'; Setting = '2ddd5a84-5a71-437e-912a-db0b8c788732'; Ac = 1; Dc = 1 },
+        @{ Label = 'Core parking decrease time'; Sub = 'SUB_PROCESSOR'; Setting = 'dfd10d17-d5eb-45dd-877a-9a34ddd15c82'; Ac = 100; Dc = 100 },
+        @{ Label = 'Core parking distribution threshold'; Sub = 'SUB_PROCESSOR'; Setting = '4bdaf4e9-d103-46d7-a5f0-6280121616ef'; Ac = 100; Dc = 100 },
         @{ Label = 'Processor performance increase threshold'; Sub = 'SUB_PROCESSOR'; Setting = '06cadf0e-64ed-448a-8927-ce7bf90eb35d'; Ac = 0; Dc = 0 },
         @{ Label = 'Processor performance decrease threshold'; Sub = 'SUB_PROCESSOR'; Setting = '12a0ab44-fe28-4fa9-b3bd-4b64f44960a6'; Ac = 100; Dc = 100 },
         @{ Label = 'Processor performance increase time'; Sub = 'SUB_PROCESSOR'; Setting = '984cf492-3bed-4488-a8f9-4286c97bf5aa'; Ac = 1; Dc = 1 },
@@ -589,6 +634,7 @@ function Apply-UltimatePowerPlan {
         @{ Label = 'Sleep idle timeout'; Sub = 'SUB_SLEEP'; Setting = 'STANDBYIDLE'; Ac = 0; Dc = 0 },
         @{ Label = 'Hibernate idle timeout'; Sub = 'SUB_SLEEP'; Setting = 'HIBERNATEIDLE'; Ac = 0; Dc = 0 },
         @{ Label = 'Hybrid sleep'; Sub = 'SUB_SLEEP'; Setting = 'HYBRIDSLEEP'; Ac = 0; Dc = 0 },
+        @{ Label = 'Away mode policy'; Sub = 'SUB_SLEEP'; Setting = '25dfa149-5dd1-4736-b5ab-e8a37b5b8187'; Ac = 0; Dc = 0 },
         @{ Label = 'Wake timers'; Sub = 'SUB_SLEEP'; Setting = 'RTCWAKE'; Ac = 0; Dc = 0 },
         @{ Label = 'Display idle timeout'; Sub = 'SUB_VIDEO'; Setting = 'VIDEOIDLE'; Ac = 0; Dc = 0 },
         @{ Label = 'Dim display timeout'; Sub = 'SUB_VIDEO'; Setting = '17aaa29b-8b43-4b94-aafe-35f64daaf1ee'; Ac = 0; Dc = 0 },
@@ -598,7 +644,10 @@ function Apply-UltimatePowerPlan {
         @{ Label = 'Adaptive brightness'; Sub = 'SUB_VIDEO'; Setting = 'ADAPTBRIGHT'; Ac = 0; Dc = 0 },
         @{ Label = 'Adaptive display'; Sub = 'SUB_VIDEO'; Setting = '90959d22-d6a1-49b9-af93-bce885ad335b'; Ac = 0; Dc = 0 },
         @{ Label = 'Display brightness'; Sub = 'SUB_VIDEO'; Setting = 'VIDEONORMALLEVEL'; Ac = 100; Dc = 100 },
-        @{ Label = 'Dimmed display brightness'; Sub = 'SUB_VIDEO'; Setting = 'f1fbfde2-a960-4165-9f88-50667911ce96'; Ac = 100; Dc = 100 }
+        @{ Label = 'Dimmed display brightness'; Sub = 'SUB_VIDEO'; Setting = 'f1fbfde2-a960-4165-9f88-50667911ce96'; Ac = 100; Dc = 100 },
+        @{ Label = 'Presence away display timeout'; Sub = '8619b916-e004-4dd8-9b66-dae86f806698'; Setting = '0a7d6ab6-ac83-4ad1-8282-eca5b58308f3'; Ac = 0; Dc = 0 },
+        @{ Label = 'Presence inattentive dim timeout'; Sub = '8619b916-e004-4dd8-9b66-dae86f806698'; Setting = 'cf8c6097-12b8-4279-bbdd-44601ee5209d'; Ac = 0; Dc = 0 },
+        @{ Label = 'Non-sensor input presence timeout'; Sub = '8619b916-e004-4dd8-9b66-dae86f806698'; Setting = '5adbbfbc-074e-4da1-ba38-db8b36b2c8f3'; Ac = 0; Dc = 0 }
     )
 
     $results = @()
@@ -640,8 +689,8 @@ function Apply-UltimatePowerPlan {
     Write-PowerPlansStatus ("  [+] Readback verified settings: {0}; mismatches: {1}" -f $verifiedCount, $mismatchCount) 'Green'
     Write-PowerPlansStatus ("  [+] Conflicting plan switchers disabled this run: {0}" -f $conflictsDisabled.Count) 'Green'
     Write-PowerPlansStatus ("  [+] Unsupported/write-rejected setting probes proven: {0}" -f $unsupportedEvidence.Count) 'Green'
-    Write-PowerPlansStatus ("  [+] NVIDIA: power max={0}; graphics clock lock={1}; memory clock lock={2}" -f $nvidiaResult.PowerLimitSet, $nvidiaResult.GraphicsClockLocked, $nvidiaResult.MemoryClockLocked) 'Green'
-    Write-PowerPlansStatus ("  [+] AMD vendor: 3D V-Cache service status={0}" -f $amdResult.VCacheService) 'Green'
+    Write-PowerPlansStatus ("  [+] NVIDIA: power max={0}; graphics clock lock={1}; memory clock lock={2}; boost slider max={3}" -f $nvidiaResult.PowerLimitSet, $nvidiaResult.GraphicsClockLocked, $nvidiaResult.MemoryClockLocked, $nvidiaResult.BoostSliderSet) 'Green'
+    Write-PowerPlansStatus ("  [+] AMD vendor: 3D V-Cache service status={0}; Ryzen Master CLI={1}" -f $amdResult.VCacheService, $amdResult.RyzenMasterCli) 'Green'
     if (-not $NoStartupTask -and -not $Silent) {
         if ($taskInstallResult.BootInstalled -and $taskInstallResult.GuardInstalled) {
             Write-PowerPlansStatus ("  [+] Startup permanence: hidden boot task and hidden recurring guard installed") 'Green'
@@ -695,7 +744,10 @@ function Apply-UltimatePowerPlan {
         NvidiaPowerLimitSet = $nvidiaResult.PowerLimitSet
         NvidiaGraphicsClockLocked = $nvidiaResult.GraphicsClockLocked
         NvidiaMemoryClockLocked = $nvidiaResult.MemoryClockLocked
+        NvidiaBoostSliderSet = $nvidiaResult.BoostSliderSet
         AmdVCacheService = $amdResult.VCacheService
+        AmdRyzenMasterCli = $amdResult.RyzenMasterCli
+        AmdRyzenMasterDriverCli = $amdResult.RyzenMasterDriverCli
     }
 
     if (-not $Silent) {

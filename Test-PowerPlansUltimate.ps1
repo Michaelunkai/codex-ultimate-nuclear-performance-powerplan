@@ -108,4 +108,11 @@ if ($LASTEXITCODE -eq 0 -and $nvidia) {
     }
 }
 
+$boostSlider = nvidia-smi boost-slider -l 2>&1
+if ($LASTEXITCODE -eq 0 -and ($boostSlider | Out-String) -match '\|\s*\d+\s+vboost\s+(\d+)\s+(\d+)\s*\|') {
+    if ([int] $matches[2] -lt [int] $matches[1]) {
+        throw "NVIDIA vboost slider is below maximum: $($matches[2]) < $($matches[1])"
+    }
+}
+
 'PASS'
